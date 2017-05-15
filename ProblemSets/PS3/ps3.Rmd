@@ -1,0 +1,320 @@
+---
+title: 'Perspective Homework #3'
+author: "Yuqing Zhang"
+date: "5/14/2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE)
+library(tidyverse)
+library(forcats)
+library(broom)
+library(modelr)
+library(stringr)
+library(ISLR)
+library(haven)
+library(car)
+library(lmtest)
+library(Amelia)
+options(digits = 3)
+set.seed(1234)
+theme_set(theme_minimal())
+options(na.action = na.warn)
+```
+
+## Problem 1
+
+
+```{r read in and lm}
+biden_data<-read_csv('biden.csv')  %>%
+  mutate(obs_num = as.numeric(rownames(.))) %>%
+  mutate(dem = factor(dem),
+         rep = factor(rep))
+
+biden <- biden_data %>%
+  na.omit()
+biden_mod <- lm(biden ~ age+educ+female,data=biden)
+tidy(biden_mod)
+```
+The coefficients for age, education and female are: 0.0419,-0.8887,6.1961 and the standard errors for age, education and female are:0.0325,0.2247,1.0967.
+
+###1. Test the model to identify any unusual and/or influential observations.
+Let's use a bubble plot to identify any unusual or influential observations.
+
+```{r bubbleplot, echo=FALSE}
+biden_augment <- biden %>%
+  mutate(hat = hatvalues(biden_mod),
+         student = rstudent(biden_mod),
+         cooksd = cooks.distance(biden_mod))
+
+biden_filter <- biden_augment %>%
+  filter(hat > 2 * mean(hat) |
+           abs(student) >2 |
+           cooksd > 4 /(nrow(.) - (length(coef(biden_mod)) - 1) - 1)) #%>%
+  #mutate(high_cooks = ifelse(cooksd > (4 /(nrow(.) - (length(coef(biden_mod)) - 1) - 1)), "high_cooks", "otherwise"))
+mean_hat <- mean(hat)
+
+# draw bubble plot
+ggplot(biden_filter, aes(hat, student)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_point(aes(size = cooksd), shape = 1) +
+  geom_vline(xintercept = 2*mean_hat, color='red',linetype = 2) +
+  scale_size_continuous(range = c(1, 20)) +
+  labs(x = "Leverage",
+       y = "Studentized residual") +
+  theme(legend.position = "none")
+```
+
+From the above bubble plot we can see there are `r nrow(biden_filter)` observations that are unusual and influential. Most of them are located at the lower left part of the plot,meaning that they have high discrepancy but lower leverage level. So what variables are representative in causing unsual or influential?
+
+```{r next step,echo=FALSE}
+biden_augment <- biden_augment %>%
+  mutate(`Unusual or Influential` = ifelse(obs_num %in% biden_filter$obs_num, "TRUE", "FALSE"))
+biden_augment %>% 
+  ggplot(aes(age, fill = `Unusual or Influential`)) +
+    geom_histogram(bins = 10) + 
+    labs(title = "Age",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Age",
+         y = "Count")
+        
+biden_augment %>% 
+  ggplot(aes(biden, fill = `Unusual or Influential`)) +
+    geom_histogram(bins = 10) + 
+    labs(title = "Biden Warmth Score",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Score",
+         y = "Count")
+
+biden_augment %>% 
+  mutate(female = ifelse(female == 1, "Female", "Male")) %>%
+  ggplot(aes(female, fill = `Unusual or Influential`)) +
+    geom_histogram(stat = "count", bins = 10) + 
+    labs(title = "Gender",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Gender",
+         y = "Count")
+
+biden_augment %>% 
+  ggplot(aes(educ, fill = `Unusual or Influential`)) +
+    geom_histogram(stat = "count", bins = 10) + 
+    labs(title = "Education",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Education",
+         y = "Count")
+
+biden_augment %>% 
+  mutate(party = ifelse(dem == 1, "Democrat", 
+                        ifelse(rep == 1, "Republican",
+                               "Independent"))) %>%
+  ggplot(aes(party, fill = `Unusual or Influential`)) +
+    geom_histogram(stat = "count", bins = 10) + 
+    labs(title = "Party Affiliation",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Party",
+         y = "Count")
+```
+
+From the above histograms we can see that older age, lower biden score, male, and being a Republican seemed to be more representative in the usual/influential group. Moving forward, regarding our initial model, I think we should include party affiliation into consideration. 
+
+###2. Test for non-normally distributed errors
+```{r nonnomality test, echo=FALSE}
+car::qqPlot(biden_mod)
+```
+
+The dashed lines indicate 95% confidence intervals calculated under the assumption that the errors are normally distributed. If any observations fall outside this range, this is an indication that the assumption has been violated. Clearly, here that is the case.
+Power and log transformations are typically used to correct this problem. Because not all response values are positive, so here I used power two and power three transformations.
+```{r transformation, echo=FALSE}
+biden <- biden %>%
+  mutate(biden_score_power2 = (biden)^2)
+biden_power2_mod <- lm(biden_score_power2 ~ age+educ+female,data=biden)
+car::qqPlot(biden_power2_mod)
+
+biden <- biden %>%
+  mutate(biden_score_power3 = (biden)^3)
+biden_power3_mod <- lm(biden_score_power3 ~ age+educ+female,data=biden)
+car::qqPlot(biden_power3_mod)
+
+```
+
+It seems like the second power transformation is more optimal. 
+
+###3. Test for heteroscedasticity in the model
+```{r hetero, echo=FALSE}
+biden %>%
+  add_predictions(biden_mod)%>%
+  add_residuals(biden_mod) %>%
+  ggplot(aes(pred, resid)) +
+  geom_point(alpha = .5) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_quantile(method = "rqss", lambda = 5, quantiles = c(.05, .95)) +
+  labs(title = "Homoscedastic variance of error terms",
+       x = "Predicted values",
+       y = "Residuals")
+bptest(biden_mod)
+```
+
+From the residuals vs. predicted value plot we see the spread of residuals decreases as the fitted values increase, indicating heteroscedasticity in the model. In addition, a small p-value also indicates heteroscedasticity in the model.
+
+```{r fixed hetero}
+# convert residuals to weights
+weights <- 1 / residuals(biden_mod)^2
+
+biden_wls <- lm(biden ~ female + educ + age, data = biden, weights = weights)
+
+tidy(biden_mod)
+tidy(biden_wls)
+```
+We see some mild changes in the estimated parameters, but drastic reductions in the standard errors. 
+
+###4. Test for multicollinearity.
+```{r collinearity}
+car::vif(biden_mod)
+```
+Since no VIF statistic in the model is greater than 10, it indicates that there is no potential multicollinearity in the model.
+
+##Problem 2
+```{r pr2 lm}
+biden_second_mod <- lm(biden ~ age+educ+age*educ,data=biden)
+tidy(biden_second_mod)
+```
+The coefficients for age, education and age:education are: 0.6719,1.6574,-0.048 and the standard errors for age, education and age:education are:0.1705,0.714,0.0129.
+
+###1.Marginal Effect of Age
+```{r marginal effect age, echo=FALSE}
+instant_effect <- function(model, mod_var){
+  # get interaction term name
+  int.name <- names(model$coefficients)[[which(str_detect(names(model$coefficients), ":"))]]
+  marg_var <- str_split(int.name, ":")[[1]][[which(str_split(int.name, ":")[[1]] != mod_var)]]
+  # store coefficients and covariance matrix
+  beta.hat <- coef(model)
+  cov <- vcov(model)
+  # possible set of values for mod_var
+  if(class(model)[[1]] == "lm"){
+    z <- seq(min(model$model[[mod_var]]), max(model$model[[mod_var]]))
+  } else {
+    z <- seq(min(model$data[[mod_var]]), max(model$data[[mod_var]]))
+  }
+  # calculate instantaneous effect
+  dy.dx <- beta.hat[[marg_var]] + beta.hat[[int.name]] * z
+  # calculate standard errors for instantaeous effect
+  se.dy.dx <- sqrt(cov[marg_var, marg_var] +
+                     z^2 * cov[int.name, int.name] +
+                     2 * z * cov[marg_var, int.name])
+  # combine into data frame
+  data_frame(z = z,
+             dy.dx = dy.dx,
+             se = se.dy.dx)
+}
+
+instant_effect(biden_second_mod, "educ") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Age",
+       subtitle = "Conditional on Education",
+       x = "Education",
+       y = "Estimated marginal effect")
+
+linearHypothesis(biden_second_mod, "age + age:educ")
+
+```
+From the hypothesis test we get p-value below .05, therefore we can conclude that the marginal effect of age is  statistically significant.The magnitude and direction can be seen from the plot.
+
+
+###2.Marginal Effect of Education
+```{r marginal effect educ, echo=FALSE}
+instant_effect(biden_second_mod, "age") %>%
+  ggplot(aes(z, dy.dx,
+             ymin = dy.dx - 1.96 * se,
+             ymax = dy.dx + 1.96 * se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Marginal effect of Education",
+       subtitle = "Conditional on Age",
+       x = "Age",
+       y = "Estimated marginal effect")
+
+linearHypothesis(biden_second_mod, "educ + age:educ")
+
+```
+
+From the hypothesis test we get p-value below .05, therefore we can conclude that the marginal effect of education is  statistically significant.The magnitude and direction can be seen from the plot.
+
+
+##3. Missing Data
+Before I use the imputation, I should test the data for multivariate normality. There are many tests in MVN packages, I chose mardiaTest.
+```{r mardiaTest}
+library(MVN)
+biden_num <- biden_data %>%
+  select(educ, age)
+mardiaTest(biden_num, qqplot = TRUE)
+```
+
+From the result from Mardia's MVN mardiaTest, we can see that the data is not multivariate normal. 
+Let's try and use either a square root and log transformation.
+
+```{r transition multivariate, echo=FALSE}
+biden_trans <- biden_num %>%
+  mutate(sqrt_age = sqrt(age),
+         sqrt_educ = sqrt(educ))
+
+mardiaTest(biden_trans%>% select(sqrt_educ, sqrt_age), qqplot = TRUE)
+
+```
+After the squre root transformation, even though the data is still not multivariate normal, the results are better than before.
+
+```{r new linear,echo=FALSE}
+biden.out <- biden_data %>%
+  mutate(dem = as.numeric(dem),
+         rep = as.numeric(rep)) %>%
+  amelia(., m = 5,sqrt = c("age",'educ'),
+         noms = c("female", "dem", "rep"), p2s = 0)
+missmap(biden.out)
+models_imp <- data_frame(data = biden.out$imputations) %>%
+  mutate(model = map(data, ~ lm(biden ~ age + female + educ,
+                                data = .x)),
+         coef = map(model, tidy)) %>%
+  unnest(coef, .id = "id")
+models_imp
+
+mi.meld.plus <- function(df_tidy){
+  # transform data into appropriate matrix shape
+  coef.out <- df_tidy %>%
+    select(id:estimate) %>%
+    spread(term, estimate) %>%
+    select(-id)
+  
+  se.out <- df_tidy %>%
+    select(id, term, std.error) %>%
+    spread(term, std.error) %>%
+    select(-id)
+  
+  combined.results <- mi.meld(q = coef.out, se = se.out)
+  
+  data_frame(term = colnames(combined.results$q.mi),
+             estimate.mi = combined.results$q.mi[1, ],
+             std.error.mi = combined.results$se.mi[1, ])
+}
+
+# compare results
+print("Comparison between imputed model and original model")
+tidy(biden_mod) %>%
+  left_join(mi.meld.plus(models_imp)) %>%
+  select(-statistic, -p.value)
+```
+
+From the above table, we can see that there does not seem to be significant difference between the coefficients of the linear model before and after the imputation process. From my opinion I think it is because the problem of non multivariate normality didn't get solved completely in previous question, so there did not show a significant change.
+
+
+
+
+
+
+
+
